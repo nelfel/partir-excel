@@ -1,5 +1,7 @@
+mod merge;
 mod package;
 mod rows;
+pub use merge::join;
 
 use crate::transfer::{Outcome, check_cancel, open_input};
 use quick_xml::{
@@ -206,9 +208,12 @@ pub fn split(
             .take(48)
             .collect();
         let dir = tempfile::Builder::new()
+            .rand_bytes(16)
             .prefix(&format!("{stem} - Excel-"))
             .tempdir_in(dest)?;
-        let mut count = 0;
+        let folder_name = dir.path().file_name().unwrap().to_string_lossy();
+        let batch = &folder_name[folder_name.len() - 16..];
+        let mut files = Vec::new();
         let total = book.sheets.len() as u64 * 1000;
         for (i, (sheet, path)) in book.sheets.iter().enumerate() {
             let source = zip.by_name(path)?;
@@ -223,8 +228,8 @@ pub fn split(
             .map_err(|e| format!("Hoja «{sheet}». {e}"))?;
             let n = rows.len();
             if n > 0 {
-                let template = package::template(&book, sheet)?;
-                count += package::parts(
+                let template = package::template(&book, &[sheet.as_str()], Some(batch))?;
+                package::parts(
                     &template,
                     &mut rows,
                     sheet,
@@ -234,18 +239,27 @@ pub fn split(
                     limit,
                     cancel,
                     |done| progress(base + 500 + done as u64 * 500 / n as u64, total),
+                    &mut files,
                 )
                 .map_err(|e| format!("Hoja «{sheet}». {e}"))?;
             }
             progress(base + 1000, total);
         }
+        let count = files.len();
         if count == 0 {
             return Err("No se encontraron filas con datos en las hojas visibles.".into());
         }
-        check_cancel(cancel)?;
+        // The part count is known only after the last compressed workbook has closed.
+        for (i, path) in files.iter().enumerate() {
+            check_cancel(cancel)?;
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            let (prefix, _) = name.rsplit_once(" - ").unwrap();
+            let new_name = format!("{prefix} - {:03} de {count:03}.xlsx", i + 1);
+            std::fs::rename(path, path.with_file_name(new_name))?;
+        }
         Ok(Outcome {
             path: dir.keep(),
-            parts: count,
+            parts: count as u64,
         })
     };
     run().map_err(io::Error::other)

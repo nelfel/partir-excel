@@ -293,8 +293,25 @@ pub fn join(
             "El archivo reconstruido no coincide con la huella del original.",
         ));
     }
+    persist_result(
+        temp,
+        dest,
+        &index.archivo,
+        index.partes.len() as u64,
+        cancel,
+    )
+}
+
+pub(crate) fn persist_result(
+    mut temp: NamedTempFile,
+    dest: &Path,
+    name: &str,
+    parts: u64,
+    cancel: &AtomicBool,
+) -> io::Result<Outcome> {
+    check_name(name)?;
     temp.as_file().sync_all()?;
-    let filename = Path::new(&index.archivo);
+    let filename = Path::new(name);
     let stem = filename.file_stem().unwrap().to_string_lossy();
     let ext = filename.extension().unwrap().to_string_lossy();
     for copy in 1u64.. {
@@ -320,10 +337,7 @@ pub fn join(
         };
         match temp.persist_noclobber(&path) {
             Ok(_) => {
-                return Ok(Outcome {
-                    path,
-                    parts: index.partes.len() as u64,
-                });
+                return Ok(Outcome { path, parts });
             }
             Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => temp = e.file,
             Err(e) => return Err(e.error),

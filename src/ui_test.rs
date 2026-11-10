@@ -186,7 +186,7 @@ fn independent_books_from_the_default_button() -> Result<(), Box<dyn std::error:
     assert!(paths.len() > 2);
     let mut index = 0u32;
     let mut total_sheets = 0;
-    for path in paths {
+    for path in &paths {
         assert_eq!(path.extension().unwrap(), "xlsx");
         assert!(fs::metadata(&path)?.len() <= 6000);
         let mut archive = zip::ZipArchive::new(fs::File::open(&path)?)?;
@@ -230,6 +230,56 @@ fn independent_books_from_the_default_button() -> Result<(), Box<dyn std::error:
     }
     assert_eq!((index, total_sheets), (500, 1));
     let dest = tempfile::tempdir()?;
+    let cancel = AtomicBool::new(false);
+    assert!(excel::join(&paths[..paths.len() - 1], dest.path(), &cancel, |_, _| {}).is_err());
+    let mut repeated = paths.clone();
+    repeated[1] = repeated[0].clone();
+    assert!(excel::join(&repeated, dest.path(), &cancel, |_, _| {}).is_err());
+    assert!(excel::join(&paths, dest.path(), &AtomicBool::new(true), |_, _| {}).is_err());
+    let other = excel::split(&input, tmp.path(), 6000, &cancel, |_, _| {})?;
+    let mut mixed = paths.clone();
+    mixed[0] = other.path.join(paths[0].file_name().unwrap());
+    assert!(excel::join(&mixed, dest.path(), &cancel, |_, _| {}).is_err());
+    assert_eq!(fs::read_dir(dest.path())?.count(), 0);
+
+    let output = draw(&mut app, &ctx, None, vec![]);
+    click(&mut app, &ctx, output, "Unir Excel");
+    assert!(app.mode == Mode::JoinExcel);
+    paths.reverse();
+    app.select_parts(paths.clone());
+    app.dest = Some(dest.path().to_owned());
+    let output = draw(&mut app, &ctx, None, vec![]);
+    click(&mut app, &ctx, output, "Unir en un .xlsx");
+    let joined = wait_for_output(&mut app, &ctx);
+    assert_eq!(joined.file_name().unwrap(), "Informe - unido.xlsx");
+    let mut result: Xlsx<_> = open_workbook(&joined)?;
+    assert!(result.has_1904_epoch());
+    assert_eq!(result.sheet_names(), ["Ventas & Sur", "Totales"]);
+    assert_eq!(
+        result.worksheet_range("Totales")?.get((0, 0)),
+        Some(&Data::String("Total".into()))
+    );
+    let data = result.worksheet_range("Ventas & Sur")?;
+    assert_eq!(data.height(), 501);
+    assert_eq!(
+        data.get((0, 0)),
+        Some(&Data::String("Código & región".into()))
+    );
+    for (i, row) in data.rows().skip(1).enumerate() {
+        let n = i as u32 + 1;
+        assert_eq!(
+            row[0],
+            Data::String(format!("{:x}", Sha256::digest(n.to_le_bytes())))
+        );
+        assert!(matches!(row[2],Data::DateTime(d) if d.as_f64()==44321.));
+        assert_eq!(row[5], Data::Float(n as f64));
+    }
+    let another = excel::join(&paths, dest.path(), &cancel, |_, _| {})?;
+    assert_eq!(
+        another.path.file_name().unwrap(),
+        "Informe - unido (2).xlsx"
+    );
+    let dest = tempfile::tempdir()?;
     assert!(excel::split(&input, dest.path(), 64, &AtomicBool::new(false), |_, _| {}).is_err());
     assert_eq!(fs::read_dir(dest.path())?.count(), 0);
     Ok(())
@@ -248,5 +298,28 @@ fn large_workbook_from_disk() -> io::Result<()> {
         |_, _| {},
     )?;
     println!("{} partes en {}", output.parts, output.path.display());
+    Ok(())
+}
+
+#[test]
+#[ignore = "Prueba manual con partes creadas por una versión anterior"]
+fn join_books_from_disk() -> io::Result<()> {
+    let folder =
+        PathBuf::from(std::env::var_os("PARTIR_EXCEL_QA_PARTS").expect("Carpeta de las partes"));
+    let dest = PathBuf::from(std::env::var_os("PARTIR_EXCEL_QA_DIR").expect("Carpeta de destino"));
+    let mut paths = fs::read_dir(folder)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    paths.retain(|p| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"))
+    });
+    paths.sort_by(|a, b| b.cmp(a));
+    let output = excel::join(&paths, &dest, &AtomicBool::new(false), |_, _| {})?;
+    println!(
+        "{} partes reunidas en {}",
+        output.parts,
+        output.path.display()
+    );
     Ok(())
 }

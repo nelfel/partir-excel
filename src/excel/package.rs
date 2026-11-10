@@ -2,7 +2,7 @@ use super::{Book, MAIN, OFFICE, REL, Result, TYPES, check_cancel, escape, rows::
 use std::{
     fs::File,
     io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -18,7 +18,7 @@ pub(super) struct Template {
     namespace: &'static str,
 }
 
-pub(super) fn template(book: &Book, sheet: &str) -> Result<Template> {
+pub(super) fn template(book: &Book, sheets: &[&str], batch: Option<&str>) -> Result<Template> {
     let (namespace, office) = if book.strict {
         (
             "http://purl.oclc.org/ooxml/spreadsheetml/main",
@@ -34,11 +34,29 @@ pub(super) fn template(book: &Book, sheet: &str) -> Result<Template> {
         Ok(())
     };
     let mut types = format!(
-        r#"<Types xmlns="{TYPES}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
+        r#"<Types xmlns="{TYPES}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#
     );
-    let mut rels = format!(
-        r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="{office}/worksheet" Target="worksheets/sheet1.xml"/>"#
+    let mut rels = format!(r#"<Relationships xmlns="{REL}">"#);
+    let mut list = String::new();
+    for (i, sheet) in sheets.iter().enumerate() {
+        let n = i + 1;
+        types.push_str(&format!(r#"<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#));
+        rels.push_str(&format!(r#"<Relationship Id="sheet{n}" Type="{office}/worksheet" Target="worksheets/sheet{n}.xml"/>"#));
+        list.push_str(&format!(
+            r#"<sheet name="{}" sheetId="{n}" r:id="sheet{n}"/>"#,
+            escape(*sheet)
+        ));
+    }
+    let mut root_rels = format!(
+        r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="{office}/officeDocument" Target="xl/workbook.xml"/>"#
     );
+    if let Some(batch) = batch {
+        let core = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+        add("docProps/core.xml", format!(r#"<cp:coreProperties xmlns:cp="{core}" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier>PartirExcel:{batch}</dc:identifier></cp:coreProperties>"#).as_bytes())?;
+        types.push_str(r#"<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>"#);
+        root_rels.push_str(&format!(r#"<Relationship Id="core" Type="{REL}/metadata/core-properties" Target="docProps/core.xml"/>"#));
+    }
+    root_rels.push_str("</Relationships>");
     if let Some(styles) = &book.styles {
         add("xl/styles.xml", styles)?;
         types.push_str(r#"<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>"#);
@@ -57,21 +75,22 @@ pub(super) fn template(book: &Book, sheet: &str) -> Result<Template> {
     rels.push_str("</Relationships>");
     add("[Content_Types].xml", types.as_bytes())?;
     add("xl/_rels/workbook.xml.rels", rels.as_bytes())?;
-    add("_rels/.rels", format!(r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="{office}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#).as_bytes())?;
-    add("xl/workbook.xml", format!(r#"<workbook xmlns="{namespace}" xmlns:r="{office}"><workbookPr date1904="{}"/><sheets><sheet name="{}" sheetId="1" r:id="rId1"/></sheets></workbook>"#, u8::from(book.date1904), escape(sheet)).as_bytes())?;
+    add("_rels/.rels", root_rels.as_bytes())?;
+    add("xl/workbook.xml", format!(r#"<workbook xmlns="{namespace}" xmlns:r="{office}"><workbookPr date1904="{}"/><sheets>{list}</sheets></workbook>"#, u8::from(book.date1904)).as_bytes())?;
     Ok(Template {
         zip: archive.finish()?.into_inner(),
         namespace,
     })
 }
 
-struct RowBuffer {
+#[derive(Default)]
+pub(super) struct RowBuffer {
     raw: Vec<u8>,
     rendered: Vec<u8>,
 }
 
 impl RowBuffer {
-    fn write(
+    pub(super) fn write(
         &mut self,
         source: &mut impl Read,
         output: &mut impl Write,
@@ -93,6 +112,31 @@ impl RowBuffer {
     }
 }
 
+impl Template {
+    pub(super) fn start<W: Write + Seek>(&self, file: W) -> Result<ZipWriter<W>> {
+        let mut out = ZipWriter::new(file);
+        let mut common = zip::ZipArchive::new(Cursor::new(&self.zip))?;
+        for i in 0..common.len() {
+            out.raw_copy_file(common.by_index(i)?)?;
+        }
+        Ok(out)
+    }
+    pub(super) fn start_sheet<W: Write + Seek>(
+        &self,
+        out: &mut ZipWriter<W>,
+        n: usize,
+        columns: &str,
+    ) -> Result<()> {
+        out.start_file(format!("xl/worksheets/sheet{n}.xml"), options())?;
+        write!(out, r#"<worksheet xmlns="{}">"#, self.namespace)?;
+        if !columns.is_empty() {
+            write!(out, "<cols>{columns}</cols>")?;
+        }
+        out.write_all(b"<sheetData>")?;
+        Ok(())
+    }
+}
+
 fn write_candidate(
     template: &Template,
     rows: &mut Rows,
@@ -104,19 +148,8 @@ fn write_candidate(
 ) -> Result<(usize, u64)> {
     let file = File::create_new(path)?;
     let observer = file.try_clone()?;
-    let mut out = ZipWriter::new(file);
-    // Desktop Excel rejects an old ZIP directory between the last two parts.
-    // Copy compressed entries into one fresh archive with a single directory.
-    let mut common = zip::ZipArchive::new(Cursor::new(&template.zip))?;
-    for i in 0..common.len() {
-        out.raw_copy_file(common.by_index(i)?)?;
-    }
-    out.start_file("xl/worksheets/sheet1.xml", options())?;
-    write!(out, r#"<worksheet xmlns="{}">"#, template.namespace)?;
-    if !rows.columns.is_empty() {
-        write!(out, "<cols>{}</cols>", rows.columns)?;
-    }
-    out.write_all(b"<sheetData>")?;
+    let mut out = template.start(file)?;
+    template.start_sheet(&mut out, 1, &rows.columns)?;
     let mut buf = RowBuffer {
         raw: Vec::new(),
         rendered: Vec::new(),
@@ -159,17 +192,9 @@ pub(super) fn parts(
     limit: u64,
     cancel: &AtomicBool,
     mut progress: impl FnMut(usize),
-) -> Result<u64> {
-    let sheet_name: String = sheet
-        .chars()
-        .map(|c| {
-            if c.is_control() || r#"\/:"*?<>|"#.contains(c) {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let sheet_name = safe_sheet_name(sheet);
     let mut start = 1;
     let mut part = 1;
     loop {
@@ -183,11 +208,10 @@ pub(super) fn parts(
                 write_candidate(template, rows, start, end, &path, limit, cancel)?;
             if actual_size <= limit {
                 start = next;
+                files.push(path);
                 progress(next);
                 break;
             }
-            // Deflate can retain a block until the ZIP is closed. Only the finished
-            // file is authoritative. Retry the same rows with a smaller range.
             std::fs::remove_file(&path)?;
             let count = next - start;
             if count <= 1 {
@@ -197,8 +221,21 @@ pub(super) fn parts(
             end = start + estimate.clamp(1, count - 1);
         }
         if start >= rows.len() {
-            return Ok(part);
+            return Ok(());
         }
         part += 1;
     }
+}
+
+pub(super) fn safe_sheet_name(sheet: &str) -> String {
+    sheet
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"\/:"*?<>|"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }

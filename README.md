@@ -1,6 +1,6 @@
 # Partir Excel
 
-Aplicación de escritorio en Rust para Windows de 64 bits. Divide las filas de un libro de Excel en archivos `.xlsx` independientes que puedes enviar por correo. Funciona localmente, sin instalar Excel.
+Aplicación de escritorio en Rust para Windows de 64 bits. Divide las filas de un libro en archivos `.xlsx` que puedes enviar por correo y vuelve a reunirlos en un solo Excel. Funciona localmente, sin instalar Excel.
 
 [Descargar PartirExcel.exe para Windows de 64 bits](https://github.com/nelfel/partir-excel/releases/latest/download/PartirExcel.exe)
 
@@ -14,11 +14,21 @@ La app recorre las hojas visibles y repite la primera fila con datos como encabe
 
 Las partes contienen datos de las celdas. Las fórmulas se exportan con su último valor guardado. Si falta ese valor, la app indica la celda para que puedas recalcular y guardar el original en Excel. Se omiten las filas vacías, hojas ocultas, gráficos, macros y objetos como tablas dinámicas. Las filas con datos filtradas u ocultas también se exportan y conservan su atributo de visibilidad. Para este modo se admiten `.xlsx`, `.xlsm`, `.xltx` y `.xltm`. Para `.xls` o `.xlsb`, guarda primero una copia como `.xlsx` en Excel.
 
+## Volver a unir las partes de Excel
+
+1. Guarda todos los adjuntos `.xlsx` de una misma división con sus nombres originales.
+2. Abre **Unir Excel**, pulsa **Elegir partes…** y selecciona todos esos archivos. También puedes arrastrarlos juntos a la ventana.
+3. Pulsa **Unir en un .xlsx**. En la carpeta de destino encontrarás un libro llamado, por ejemplo, `Ventas - unido.xlsx`. Si el nombre ya existe, la app crea una copia numerada.
+
+Puedes seleccionar las partes en cualquier orden. La app reconstruye las hojas exportadas con sus nombres, ordena las filas según su número de parte y escribe un solo encabezado por hoja. Conserva los datos que contienen las partes, incluidos los resultados guardados de las fórmulas.
+
+Desde la versión 1.2, los nombres incluyen el número y el total de partes del envío. La app comprueba el conjunto antes de guardar. También admite las partes creadas con la versión 1.1. Estas solo indican el número dentro de cada hoja. Si las recibiste por correo, confirma con quien las envió cuántas partes hay por hoja. En ese formato, la app puede detectar un salto intermedio, pero carece del total para detectar una última parte o una hoja entera ausente.
+
 ## Enviar una copia exacta en fragmentos binarios
 
-Selecciona **Crear .bin**, elige el libro y pulsa **Dividir archivo**. Envía todas las partes `.bin` y el índice `Unir.json`. Las partes de la versión 1.0 también se pueden reconstruir con la versión 1.1.
+Selecciona **Crear .bin**, elige el libro y pulsa **Dividir archivo**. Envía todas las partes `.bin` y el índice `Unir.json`. Este modo también admite las partes creadas con la versión 1.0.
 
-## Recibir el libro
+## Unir los fragmentos binarios
 
 1. Guarda las partes y el índice juntos en una carpeta.
 2. Abre la app, pulsa **Unir .bin** y elige `Unir.json`. También puedes arrastrar el índice directamente a la ventana.

@@ -27,12 +27,14 @@ const PAPER: Color32 = Color32::from_rgb(248, 250, 248);
 enum Mode {
     #[default]
     Excel,
+    JoinExcel,
     Split,
     Join,
 }
 
 struct Selection {
     path: PathBuf,
+    files: Vec<PathBuf>,
     name: String,
     bytes: u64,
     parts: Option<usize>,
@@ -140,6 +142,7 @@ impl App {
         self.message = None;
         let selection = (|| -> io::Result<Selection> {
             let (name, bytes, parts) = match self.mode {
+                Mode::JoinExcel => unreachable!("La unión usa selección múltiple"),
                 Mode::Excel | Mode::Split => {
                     let name = path
                         .file_name()
@@ -170,6 +173,7 @@ impl App {
             };
             Ok(Selection {
                 path,
+                files: Vec::new(),
                 name,
                 bytes,
                 parts,
@@ -187,9 +191,49 @@ impl App {
         }
     }
 
+    fn select_parts(&mut self, paths: Vec<PathBuf>) {
+        self.reset(Mode::JoinExcel);
+        let Some(first) = paths.first() else { return };
+        let mut bytes = 0;
+        for path in &paths {
+            if !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"))
+            {
+                self.message = Some("Selecciona únicamente las partes .xlsx del libro.".into());
+                return;
+            }
+            match fs::metadata(path) {
+                Ok(info) if info.is_file() => bytes += info.len(),
+                _ => {
+                    self.message = Some(format!("No se pudo leer {}.", path.display()));
+                    return;
+                }
+            }
+        }
+        self.dest = first.parent().map(Path::to_path_buf);
+        self.selection = Some(Selection {
+            path: first.clone(),
+            name: format!("{} (.xlsx)", parts_label(paths.len() as u64)),
+            bytes,
+            parts: Some(paths.len()),
+            files: paths,
+        });
+    }
+
     fn choose_file(&mut self, frame: &eframe::Frame) {
         let dialog = rfd::FileDialog::new().set_parent(frame);
         let dialog = match self.mode {
+            Mode::JoinExcel => {
+                if let Some(paths) = dialog
+                    .set_title("Selecciona todas las partes de un mismo libro")
+                    .add_filter("Partes de Excel", &["xlsx"])
+                    .pick_files()
+                {
+                    self.select_parts(paths);
+                }
+                return;
+            }
             Mode::Excel => dialog
                 .set_title("Elegir libro para dividir por filas")
                 .add_filter("Libros de Excel", excel::EXTENSIONS),
@@ -210,6 +254,7 @@ impl App {
             return;
         };
         let source = file.path.clone();
+        let files = file.files.clone();
         let mode = self.mode;
         self.result = None;
         self.message = None;
@@ -223,6 +268,7 @@ impl App {
                 meter.store(value, Ordering::Relaxed);
             };
             match mode {
+                Mode::JoinExcel => excel::join(&files, &dest, &stop, progress),
                 Mode::Excel => excel::split(&source, &dest, limit, &stop, progress),
                 Mode::Split => transfer::split(&source, &dest, limit, &stop, progress),
                 Mode::Join => transfer::join(&source, &dest, &stop, progress),
@@ -259,10 +305,12 @@ impl App {
     }
 
     fn inputs(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        let split = self.mode != Mode::Join;
+        let split = matches!(self.mode, Mode::Excel | Mode::Split);
         ui.label(
             RichText::new(if split {
                 "Archivo de Excel"
+            } else if self.mode == Mode::JoinExcel {
+                "Partes de Excel"
             } else {
                 "Índice de las partes"
             })
@@ -272,6 +320,8 @@ impl App {
             if ui
                 .button(if split {
                     "Elegir Excel…"
+                } else if self.mode == Mode::JoinExcel {
+                    "Elegir partes…"
                 } else {
                     "Elegir Unir.json…"
                 })
@@ -286,6 +336,8 @@ impl App {
                 ui.label(
                     RichText::new(if split {
                         "También puedes arrastrarlo aquí."
+                    } else if self.mode == Mode::JoinExcel {
+                        "También puedes arrastrar todas las partes aquí."
                     } else {
                         "Guarda el índice y las partes en la misma carpeta."
                     })
@@ -353,6 +405,8 @@ impl App {
                 .unwrap_or_else(|| {
                     if split {
                         "La carpeta del Excel"
+                    } else if self.mode == Mode::JoinExcel {
+                        "La carpeta de las partes"
                     } else {
                         "La carpeta del índice"
                     }
@@ -364,13 +418,17 @@ impl App {
     }
 
     fn action(&mut self, ui: &mut egui::Ui) {
-        let split = self.mode != Mode::Join;
+        let split = matches!(self.mode, Mode::Excel | Mode::Split);
         let limit = if split {
             size_limit(&self.size, self.unit)
         } else {
             Ok(1)
         };
         let preview = match (&self.selection, &limit) {
+            (Some(file), Ok(_)) if self.mode == Mode::JoinExcel => Ok(format!(
+                "{} en total   ·   Se guardará un solo .xlsx",
+                mb(file.bytes)
+            )),
             (Some(file), Ok(_)) if self.mode == Mode::Excel => Ok(format!(
                 "{} de origen   ·   Salida en .xlsx",
                 mb(file.bytes)
@@ -399,6 +457,17 @@ impl App {
         match &preview {
             Ok(text) if !text.is_empty() => {
                 ui.label(RichText::new(text).color(GREEN).strong());
+                if self.mode == Mode::JoinExcel
+                    && self.selection.as_ref().is_some_and(|file| {
+                        file.path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .and_then(|s| s.rsplit_once(" - "))
+                            .is_some_and(|(_, number)| number.bytes().all(|c| c.is_ascii_digit()))
+                    })
+                {
+                    ui.label("Partes de la versión 1.1. Comprueba que tienes la última parte de cada hoja.");
+                }
             }
             Err(error) => {
                 ui.colored_label(Color32::DARK_RED, error.to_string());
@@ -416,6 +485,7 @@ impl App {
             let button = egui::Button::new(
                 RichText::new(match self.mode {
                     Mode::Excel => "Crear archivos .xlsx",
+                    Mode::JoinExcel => "Unir en un .xlsx",
                     Mode::Split => "Dividir archivo",
                     Mode::Join => "Reconstruir Excel",
                 })
@@ -440,6 +510,11 @@ impl App {
             let message = if self.mode == Mode::Excel {
                 format!(
                     "Listo. Puedes abrir y enviar cada .xlsx por separado ({}).",
+                    parts_label(outcome.parts)
+                )
+            } else if self.mode == Mode::JoinExcel {
+                format!(
+                    "Libro unido. Se reunieron {} en un solo .xlsx.",
                     parts_label(outcome.parts)
                 )
             } else if split {
@@ -473,9 +548,22 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll(ctx);
         if self.job.is_none() {
-            if let Some(path) =
-                ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
+            let paths: Vec<_> = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect()
+            });
+            if paths.len() > 1
+                || (self.mode == Mode::JoinExcel
+                    && paths.first().is_some_and(|p| {
+                        p.extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"))
+                    }))
             {
+                self.select_parts(paths);
+            } else if let Some(path) = paths.into_iter().next() {
                 self.reset(
                     if path
                         .extension()
@@ -506,7 +594,7 @@ impl eframe::App for App {
                         ui.add_space(5.);
                         ui.add_enabled_ui(self.job.is_none(), |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                for (mode, name) in [(Mode::Excel, "Dividir en Excel"), (Mode::Split, "Crear .bin"), (Mode::Join, "Unir .bin")]
+                                for (mode, name) in [(Mode::Excel, "Dividir en Excel"), (Mode::JoinExcel, "Unir Excel"), (Mode::Split, "Crear .bin"), (Mode::Join, "Unir .bin")]
                                 {
                                     let active = self.mode == mode;
                                     let fill = if active { INK } else { Color32::WHITE };
@@ -534,6 +622,7 @@ impl eframe::App for App {
                         ui.label(
                             RichText::new(match self.mode {
                                 Mode::Excel => "Distribuye las filas de cada hoja visible en libros .xlsx. Cada archivo repite el encabezado y muestra las fórmulas como valores guardados.",
+                                Mode::JoinExcel => "Selecciona todas las partes .xlsx con sus nombres originales. La app ordena las filas y deja un encabezado por hoja.",
                                 Mode::Split => "Divide el libro en archivos .bin para reconstruirlo después.",
                                 Mode::Join => "Reconstruye el libro original a partir de las partes recibidas.",
                             })
