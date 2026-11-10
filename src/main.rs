@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod excel;
 mod transfer;
 #[cfg(test)]
 mod ui_test;
@@ -25,6 +26,7 @@ const PAPER: Color32 = Color32::from_rgb(248, 250, 248);
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Mode {
     #[default]
+    Excel,
     Split,
     Join,
 }
@@ -57,10 +59,10 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
-            mode: Mode::Split,
+            mode: Mode::Excel,
             selection: None,
             dest: None,
-            size: "20".into(),
+            size: "15".into(),
             unit: 1_000_000,
             job: None,
             result: None,
@@ -138,13 +140,22 @@ impl App {
         self.message = None;
         let selection = (|| -> io::Result<Selection> {
             let (name, bytes, parts) = match self.mode {
-                Mode::Split => {
+                Mode::Excel | Mode::Split => {
                     let name = path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned();
                     let ext = path.extension().unwrap_or_default().to_string_lossy();
+                    if self.mode == Mode::Excel
+                        && !excel::EXTENSIONS
+                            .iter()
+                            .any(|s| ext.eq_ignore_ascii_case(s))
+                    {
+                        return Err(io::Error::other(
+                            "Para crear libros pequeños, guarda el original como .xlsx en Excel y vuelve a elegirlo.",
+                        ));
+                    }
                     if !EXTENSIONS.iter().any(|s| ext.eq_ignore_ascii_case(s)) {
                         return Err(io::Error::other(
                             "Elige un libro de Excel, por ejemplo un archivo .xlsx.",
@@ -179,6 +190,9 @@ impl App {
     fn choose_file(&mut self, frame: &eframe::Frame) {
         let dialog = rfd::FileDialog::new().set_parent(frame);
         let dialog = match self.mode {
+            Mode::Excel => dialog
+                .set_title("Elegir libro para dividir por filas")
+                .add_filter("Libros de Excel", excel::EXTENSIONS),
             Mode::Split => dialog
                 .set_title("Seleccionar un libro de Excel")
                 .add_filter("Libros de Excel", EXTENSIONS),
@@ -209,6 +223,7 @@ impl App {
                 meter.store(value, Ordering::Relaxed);
             };
             match mode {
+                Mode::Excel => excel::split(&source, &dest, limit, &stop, progress),
                 Mode::Split => transfer::split(&source, &dest, limit, &stop, progress),
                 Mode::Join => transfer::join(&source, &dest, &stop, progress),
             }
@@ -244,7 +259,7 @@ impl App {
     }
 
     fn inputs(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        let split = self.mode == Mode::Split;
+        let split = self.mode != Mode::Join;
         ui.label(
             RichText::new(if split {
                 "Archivo de Excel"
@@ -286,7 +301,7 @@ impl App {
                     .add(
                         egui::TextEdit::singleline(&mut self.size)
                             .desired_width(70.)
-                            .hint_text("20"),
+                            .hint_text("15"),
                     )
                     .changed();
                 let prev = self.unit;
@@ -349,13 +364,17 @@ impl App {
     }
 
     fn action(&mut self, ui: &mut egui::Ui) {
-        let split = self.mode == Mode::Split;
+        let split = self.mode != Mode::Join;
         let limit = if split {
             size_limit(&self.size, self.unit)
         } else {
             Ok(1)
         };
         let preview = match (&self.selection, &limit) {
+            (Some(file), Ok(_)) if self.mode == Mode::Excel => Ok(format!(
+                "{} de origen   ·   Salida en .xlsx",
+                mb(file.bytes)
+            )),
             (Some(file), Ok(limit)) => {
                 let count = file
                     .parts
@@ -395,10 +414,10 @@ impl App {
             }
         } else {
             let button = egui::Button::new(
-                RichText::new(if split {
-                    "Dividir archivo"
-                } else {
-                    "Reconstruir Excel"
+                RichText::new(match self.mode {
+                    Mode::Excel => "Crear archivos .xlsx",
+                    Mode::Split => "Dividir archivo",
+                    Mode::Join => "Reconstruir Excel",
                 })
                 .color(Color32::WHITE)
                 .strong(),
@@ -418,7 +437,12 @@ impl App {
         }
         if let Some(outcome) = &self.result {
             ui.add_space(5.);
-            let message = if split {
+            let message = if self.mode == Mode::Excel {
+                format!(
+                    "Listo. Puedes abrir y enviar cada .xlsx por separado ({}).",
+                    parts_label(outcome.parts)
+                )
+            } else if split {
                 format!(
                     "Listo. Envía los archivos .bin ({}) junto con {INDEX}.",
                     parts_label(outcome.parts)
@@ -458,8 +482,10 @@ impl eframe::App for App {
                         .is_some_and(|e| e.eq_ignore_ascii_case("json"))
                     {
                         Mode::Join
-                    } else {
+                    } else if self.mode == Mode::Split {
                         Mode::Split
+                    } else {
+                        Mode::Excel
                     },
                 );
                 self.select(path);
@@ -479,8 +505,8 @@ impl eframe::App for App {
                         );
                         ui.add_space(5.);
                         ui.add_enabled_ui(self.job.is_none(), |ui| {
-                            ui.horizontal(|ui| {
-                                for (mode, name) in [(Mode::Split, "Dividir"), (Mode::Join, "Unir")]
+                            ui.horizontal_wrapped(|ui| {
+                                for (mode, name) in [(Mode::Excel, "Dividir en Excel"), (Mode::Split, "Crear .bin"), (Mode::Join, "Unir .bin")]
                                 {
                                     let active = self.mode == mode;
                                     let fill = if active { INK } else { Color32::WHITE };
@@ -506,10 +532,10 @@ impl eframe::App for App {
                         });
                         ui.add_space(6.);
                         ui.label(
-                            RichText::new(if self.mode == Mode::Split {
-                                "Divide el libro en partes para enviarlas por separado."
-                            } else {
-                                "Reconstruye el libro original a partir de las partes recibidas."
+                            RichText::new(match self.mode {
+                                Mode::Excel => "Distribuye las filas de cada hoja visible en libros .xlsx. Cada archivo repite el encabezado y muestra las fórmulas como valores guardados.",
+                                Mode::Split => "Divide el libro en archivos .bin para reconstruirlo después.",
+                                Mode::Join => "Reconstruye el libro original a partir de las partes recibidas.",
                             })
                             .color(MUTED),
                         );

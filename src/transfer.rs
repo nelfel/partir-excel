@@ -93,7 +93,7 @@ fn check_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn open_input(path: &Path) -> io::Result<File> {
+pub(crate) fn open_input(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -147,7 +147,7 @@ pub struct Outcome {
     pub parts: u64,
 }
 
-fn check_cancel(cancel: &AtomicBool) -> io::Result<()> {
+pub(crate) fn check_cancel(cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) {
         Err(io::Error::new(
             io::ErrorKind::Interrupted,

@@ -1,6 +1,6 @@
 [package]
 name = "partir-excel"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 
 [dependencies]
@@ -10,6 +10,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
+quick-xml = { version = "=0.42.0", features = ["encoding"] }
+zip = { version = "=9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+calamine = "=0.37.0"
 
 [profile.release]
 strip = true
